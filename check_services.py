@@ -20,6 +20,8 @@ class CheckServices:
         short=False,
         error=False,
         short_error=False,
+        lines=None,
+        hostname=None,
         custom_only=False,
         no_custom=False,
         default_user="root",
@@ -41,6 +43,9 @@ class CheckServices:
             self.__sudo = False
         else:
             self.__sudo = True
+
+        self.__lines = lines if lines is not None else 5
+
         self.__generic_services_list = config.get("generic_services", {}).get(
             "services", []
         )
@@ -55,6 +60,7 @@ class CheckServices:
         self.__short = short
         self.__error = error
         self.__short_error = short_error
+        self.__hostname = hostname
         self.__custom_only = custom_only
         self.__no_custom = no_custom
 
@@ -157,9 +163,13 @@ class CheckServices:
                     print("")
                 print(f"\t\033[1;91m{service}\033[0m")
                 if self.__sudo:
-                    short_error_cmd = "sudo /usr/bin/journalctl -n5 -u " + service
+                    short_error_cmd = (
+                        f"sudo /usr/bin/journalctl -n{self.__lines} -u " + service
+                    )
                 else:
-                    short_error_cmd = "/usr/bin/journalctl -n5 -u " + service
+                    short_error_cmd = (
+                        f"/usr/bin/journalctl -n{self.__lines} -u " + service
+                    )
                 stdin, stdout, stderr = self.__ssh_client.exec_command(short_error_cmd)
 
                 print(stdout.read().decode("utf-8"))
@@ -181,7 +191,16 @@ class CheckServices:
             return "unknown"
 
     def check(self):
-        for host in self.__hosts_list:
+        hosts_to_check = self.__hosts_list
+
+        if self.__hostname is not None:
+            hosts_to_check = [
+                host
+                for host in self.__hosts_list
+                if host.get_hostname() == self.__hostname
+            ]
+
+        for host in hosts_to_check:
             try:
                 hostname = host.get_hostname()
                 services = host.get_services()
@@ -248,6 +267,14 @@ def main():
         help="Like --short but includes last 5 lines of journal log for failed services",
     )
     parser.add_argument(
+        "--lines",
+        help="The number of lines you want to see from the journal for a failed service",
+    )
+    parser.add_argument(
+        "--hostname",
+        help="The name of a specific host from the yaml file",
+    )
+    parser.add_argument(
         "--custom_only",
         action="store_true",
         help="Only the custom commands to check the services",
@@ -272,6 +299,8 @@ def main():
         short=args.short,
         error=args.error,
         short_error=args.short_error,
+        lines=args.lines,
+        hostname=args.hostname,
         custom_only=args.custom_only,
         no_custom=args.no_custom,
     )
