@@ -1,0 +1,19 @@
+---
+source_location: fqdn for the server from where to download from 
+destination_location: the path where the updates will be downloaded to
+protocol: the protocol that is used like rysnc or ftp
+
+distributions:
+  <distribution_name>:
+    override: False
+    protocol: 
+    source_location: 
+    source_path: 
+    versions:
+      <distribution_version_number>:
+        - <repository name>: remote path from where to download
+          override: False
+          source_path: 
+          source_distribution:
+          alt_destination:
+  

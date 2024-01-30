@@ -1,0 +1,24 @@
+---
+backup_location: path to where te backups will be writen 
+remote_user: the user to connect to
+need_mount_fs: True or False if a filesystem has to be mounted
+number_of_versions: the number of versions of the backup that has to be kept
+encrypt_storage: True or False if an encrypted file has to be used as a filesystem to backup to
+source_location:
+    <hostname>:
+      - directory: path of the directory
+        exclude:
+          - "*.log"
+      - directory: path of a second directory
+    <hostname>:
+      - directory: directory path 
+encryptfs:
+  remote_type: sshfs or nfs
+  remote_server: fqdn of the remote remote_server 
+  remote_port: the port number to connect to
+  remote_path: the path on the remote server to use 
+  remote_username: the user to connect to the remote server
+  remote_mount_point: the mountpoint where the share has to be mounted on the local machine
+  key_file: the key file to use for encryption
+  cyrpt_mount_point: the mountpoint where the encrypted filesystem is mounted
+  crypt_file_name: the name of the encrypted filesystems file

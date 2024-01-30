@@ -1,0 +1,14 @@
+---
+user: root
+generic_services:
+  services: 
+    - service name here
+    - second service
+
+hosts:
+  hostname:
+    services:
+      - service name here
+      - second service
+    custom:
+      - "your custom command here"
