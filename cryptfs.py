@@ -6,15 +6,21 @@ import subprocess
 import argparse
 import base64
 import getpass
+import shutil
 from pathlib import Path
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-from logger import Logger
-from support_methods import size_of_format, convert_size_to_bytes, parse_size_unit, get_available_space
+import logging  # Changed from 'from logger import Logger'
 from mount_manager import MountManager
+from systemd.journal import JournalHandler
 
 class CryptFs:
     def __init__(self, config=None):
+        self.__interactive = sys.stdin.isatty()
+
+        if logging.getLogger().hasHandlers():
+            self.__logger = logging.getLogger(__name__)
+
         self.__config = config or {}
         self.__remote_type = self.__config.get("remote_type")
         self.__remote_server = self.__config.get("remote_server")
@@ -31,7 +37,29 @@ class CryptFs:
         self.__crypt_device_name = 'crypt_backup'
         self.__crypt_file = None
 
-        self.__logger = Logger()
+        # Initialize logger
+        self.__logger = logging.getLogger("CryptFs")
+
+    def configure_logging(self):
+        logger = logging.getLogger()
+        logger.setLevel(logging.DEBUG if self.__interactive else logging.INFO)
+        logger.handlers.clear()  # Clear existing handlers to avoid duplicates
+
+        # Formatter for all handlers
+        formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+
+        # Add console handler for interactive mode
+        if self.__interactive:
+            console_handler = logging.StreamHandler()
+            console_handler.setLevel(logging.DEBUG)
+            console_handler.setFormatter(formatter)
+            logger.addHandler(console_handler)
+
+        # Add JournalHandler for logging to the systemd journal
+        journal_handler = JournalHandler()
+        journal_handler.setFormatter(formatter)
+        logger.addHandler(journal_handler)
+        self.__logger = logger
 
     def set_crypt_mount_point(self, mount_point):
         self.__crypt_mount_point = Path(mount_point)
@@ -54,16 +82,16 @@ class CryptFs:
                 mount_fs = MountManager(self.__remote_mount_point, mount_type=self.__remote_type, remote_path=self.__remote_path, server=self.__remote_server, credential_file=self.__remote_credential_file, secure=self.__remote_secure)
             mount_fs.mount()
         except Exception as e:
-            self.__logger.log_error(f'Error mounting {self.__remote_mount_point}.')
+            self.__logger.error(f'Error mounting {self.__remote_mount_point}.')
 
     def __unlock_key(self):
         try:
             with open(self.__key_file, 'rb') as key_file:
                 self.__derived_key = key_file.read()
         except Exception as e:
-            self.__logger.log_error(f'Error reading key file: {e}')
+            self.__logger.error(f'Error reading key file: {e}')
             return
-    
+
     def __prepare_open(self):
         self.__mount_remote_fs()
         self.__unlock_key()
@@ -89,23 +117,21 @@ class CryptFs:
 
     def create_fs_file(self, size_unit):
         # Create the encrypted filesystem file
-        size, unit = parse_size_unit(size_unit)
+        size, unit = self.__parse_size_unit(size_unit)
 
-        valid_units = ('K', 'M', 'G', 'T')
-        if unit not in valid_units:
-            self.__logger.log_error(f"Invalid unit: {unit}. Valid units are {', '.join(valid_units)}")
+        if not self.__get_valid_unit(unit):
             exit(1)
 
         if self.__config:
             self.__prepare_open()
 
         # Calculate the size in bytes based on the unit
-        size_bytes = convert_size_to_bytes(size, unit)
-        available_space = get_available_space(self.__remote_mount_point)
+        size_bytes = self.__convert_size_to_bytes(size, unit)
+        available_space = self.__get_available_space(self.__remote_mount_point)
 
         # Check if there is enough free space in the filesystem
         if size_bytes > available_space:
-            self.__logger.log_error(f'Not enough free space in the filesystem. {size_of_format(available_space)} available. {size}{unit} needed.')
+            self.__logger.error(f'Not enough free space in the filesystem. {self.__size_of_format(available_space)} available. {size}{unit} needed.')
             exit(1)            
         try:
             crypt_device = os.path.join('/dev/mapper', self.__crypt_device_name)
@@ -118,32 +144,30 @@ class CryptFs:
             crypt_mount = MountManager(self.__crypt_mount_point, device=crypt_device)
             crypt_mount.mount()
 
-            self.__logger.log(f'Created encrypted filesystem on {self.__crypt_file}.')
+            self.__logger.info(f'Created encrypted filesystem on {self.__crypt_file}.')
         except subprocess.CalledProcessError as e:
-            self.__logger.log_error(f'Error creating filesystem: {e}')    
+            self.__logger.error(f'Error creating filesystem: {e}')    
 
     def resize_fs(self, size_unit):
         # Resize the encrypted filesystem file
-        size, unit = parse_size_unit(size_unit)
+        size, unit = self.__parse_size_unit(size_unit)
 
-        valid_units = ('K', 'M', 'G', 'T')
-        if unit not in valid_units:
-            self.__logger.log_error(f"Invalid unit: {unit}. Valid units are {', '.join(valid_units)}")
+        if not self.__get_valid_unit(unit):
             exit(1)
 
         self.__prepare_open()
-        
-        size_bytes = convert_size_to_bytes(size, unit)
+
+        size_bytes = self.__convert_size_to_bytes(size, unit)
         current_size = os.path.getsize(self.__crypt_file)
         new_size = current_size + size_bytes
 
         path = self.__crypt_file.parent
-        formatted_size = size_of_format(new_size)
-        
-        available_space = get_available_space(path)
+        formatted_size = self.__size_of_format(new_size)
+
+        available_space = self.__get_available_space(path)
 
         if new_size > available_space:
-            self.__logger.log_error(f'Not enough free space in the filesystem. {size_of_format(available_space)} available. {formatted_size} needed.')
+            self.__logger.error(f'Not enough free space in the filesystem. {self.__size_of_format(available_space)} available. {formatted_size} needed.')
             exit(1) 
 
         try:
@@ -157,9 +181,9 @@ class CryptFs:
             crypt_mount.mount()
 
             subprocess.run(['xfs_growfs', self.__crypt_mount_point])
-            self.__logger.log(f'Resized {self.__crypt_mount_point} to {formatted_size}.')
+            self.__logger.info(f'Resized {self.__crypt_mount_point} to {formatted_size}.')
         except subprocess.CalledProcessError as e:
-            self.__logger.log_error(f'Error resizing filesystem: {e}')         
+            self.__logger.error(f'Error resizing filesystem: {e}')         
 
     def unlock_fs(self):
         self.__prepare_open()
@@ -168,19 +192,69 @@ class CryptFs:
         try:
             subprocess.run(['cryptsetup', 'open', '--key-file', '-', self.__crypt_file, self.__crypt_device_name],input=self.__derived_key, check=True)
             subprocess.run(['mount', '/dev/mapper/' + self.__crypt_device_name, self.__crypt_mount_point], check=True)
-            self.__logger.log(f'Mounted encrypted file {self.__crypt_file} on {self.__crypt_mount_point}.')
+            self.__logger.info(f'Mounted encrypted file {self.__crypt_file} on {self.__crypt_mount_point}.')
         except subprocess.CalledProcessError as e:
-            self.__logger.log_error(f'Error unlocking encrypted filesystem: {e}')
+            self.__logger.error(f'Error unlocking encrypted filesystem: {e}')
 
     def lock_fs(self):
         umount_crypt_fs = MountManager(self.__crypt_mount_point)
         umount_crypt_fs.umount()
 
-        self.__logger.log(f'Unmounted encrypted filesystem {self.__crypt_mount_point}.')
+        self.__logger.info(f'Unmounted encrypted filesystem {self.__crypt_mount_point}.')
         subprocess.run(['cryptsetup', 'close', self.__crypt_device_name])
 
         umount_fs = MountManager(self.__remote_mount_point)
         umount_fs.umount()
+
+    def __size_of_format(num, suffix='B'):
+        for unit in ['', 'K', 'M', 'G', 'T', 'P', 'E', 'Z']:
+            if abs(num) < 1024.0:
+                return f"{num:.1f} {unit}{suffix}"
+            num /= 1024.0
+        return f"{num:.1f} Y{suffix}"
+
+    def __parse_size_unit(input_str):
+        try:
+            # Split the input into size and unit
+            size_str, unit = input_str[:-1], input_str[-1]
+            # Convert size to an integer
+            size = int(size_str)
+            return size, unit
+        except ValueError:
+            raise ValueError("Invalid size/unit format. Example format: '500G'")
+
+    def __convert_size_to_bytes(size, unit):
+        units = {'K': 1024, 'M': 1024**2, 'G': 1024**3, 'T': 1024**4}
+        if unit in units:
+            return size * units[unit]
+        else:
+            raise ValueError(f"Invalid unit: {unit}")
+
+    def __get_valid_unit(self, unit):
+        valid_units = ('K', 'M', 'G', 'T')
+        if unit not in valid_units:
+            raise ValueError(f"Invalid unit: {unit}. Valid units are {', '.join(valid_units)}")
+        return True
+
+    def __get_available_space(path, unit=None):
+        try:
+            # Get disk usage statistics for the specified path
+            usage = shutil.disk_usage(path)
+
+            # Calculate the available space in bytes
+            available_space = usage.free
+
+            # Convert available space to a human-readable format (e.g., GiB)
+            if unit:
+                units = {'K': 1024, 'M': 1024**2, 'G': 1024**3, 'T': 1024**4}
+                if unit in units:
+                    return available_space * units[unit]
+
+            return available_space
+
+        except Exception as e:
+            # Handle any errors that may occur
+            raise ValueError(f"Error retrieving disk usage: {e}")        
 
 def main():
     parser = argparse.ArgumentParser(description='Encrypted FS tool')
@@ -237,6 +311,7 @@ def main():
             config = yaml.safe_load(file)
             encryptfs_config = config.get("encryptfs", {})  # Get the 'encryptfs' section from the config
             cryptfs = CryptFs(encryptfs_config)
+            cryptfs.configure_logging()
 
             if not cryptfs.get_crypt_mount_point():
                 crypt_mount_point = config.get('backup_location', None)
@@ -274,6 +349,7 @@ def main():
     elif args.command == 'genkey':
         # Handle 'genkey' subcommand
         cryptfs = CryptFs()
+        cryptfs.configure_logging()
         output_file = args.output_file
         cryptfs.set_key_file(output_file)
         password = getpass.getpass("Enter a password: ")
@@ -281,6 +357,7 @@ def main():
         
     elif args.command == 'createfs':
         cryptfs = CryptFs()
+        cryptfs.configure_logging()
         key_file = args.key_file
         encrypted_file = args.encrypted_file
         size_unit = args.size_unit

@@ -9,16 +9,16 @@ from pathlib import Path
 import argparse
 import socket
 from cryptfs import CryptFs
-from logger import Logger
+import logging  # Changed from 'from logger import Logger'
 from mount_manager import MountManager
-
-# Set the self.__logger's name to your program's name
-#logger = logging.logger(__name__)
+from systemd.journal import JournalHandler
 
 # Class for the rsync backup.
 class RsyncBackup:
     def __init__(self, config_file, dryrun=False):
         self.__interactive = sys.stdin.isatty()
+        if not logging.getLogger().hasHandlers():
+            self.__logger = logging.getLogger(__name__)
         self.__rsync_backups = []
 
         self.__dryrun = dryrun
@@ -26,23 +26,25 @@ class RsyncBackup:
         with open(config_file) as file:
             config = yaml.safe_load(file)
 
-        self.__backup_user = config.get('remote_user', 'root')
-        self.__date_format = config.get('backup_date_format', "%Y%m%d")
+        self.__backup_user = config.get("remote_user", "root")
+        self.__date_format = config.get("backup_date_format", "%Y%m%d")
         self.__backup_date = datetime.now().strftime(self.__date_format)
-        self.__backup_location = config['backup_location']
-        self.__need_mount_fs = config.get('need_mount_fs', True)
-        self.__number_of_versions = config.get('number_of_versions', 180)
-        encrypt_storage = config.get('encrypt_storage', False)
+        self.__backup_location = config["backup_location"]
+        self.__need_mount_fs = config.get("need_mount_fs", True)
+        self.__number_of_versions = config.get("number_of_versions", 180)
+        encrypt_storage = config.get("encrypt_storage", False)
 
-        self.__logger = Logger()
-        
-        # Create a list of objectes from the yaml file.
+                # Create a list of objects from the yaml file.
         source_location = config.get("source_location", {})
         for server_name, directories in source_location.items():
             for directory_config in directories:
-                directory = directory_config.get('directory', '')
-                exclude_list = directory_config.get('exclude', [])  # Get exclude list if specified
-                self.__rsync_backups.append(RsyncObject(server_name, directory, exclude_list))
+                directory = directory_config.get("directory", "")
+                exclude_list = directory_config.get(
+                    "exclude", []
+                )  # Get exclude list if specified
+                self.__rsync_backups.append(
+                    RsyncObject(server_name, directory, exclude_list)
+                )
 
         if "encryptfs" in config and encrypt_storage:
             cryptfs_config = config["encryptfs"]
@@ -50,38 +52,59 @@ class RsyncBackup:
         else:
             self.__cryptfs = None
 
+    def configure_logging(self):
+        logger = logging.getLogger()
+        logger.setLevel(logging.DEBUG if self.__interactive else logging.INFO)
+        logger.handlers.clear()  # Clear existing handlers to avoid duplicates
+
+        # Formatter for all handlers
+        formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+
+        # Add console handler for interactive mode
+        if self.__interactive:
+            console_handler = logging.StreamHandler()
+            console_handler.setLevel(logging.DEBUG)
+            console_handler.setFormatter(formatter)
+            logger.addHandler(console_handler)
+
+        # Add JournalHandler for logging to the systemd journal
+        journal_handler = JournalHandler()
+        journal_handler.setFormatter(formatter)
+        logger.addHandler(journal_handler)
+        self.__logger = logger
+
     # Set the start time of the backup.
     def __pre_backup(self):
         self.start_time = time.time()
-        self.__logger.log("Start backup")
+        self.__logger.info("Start backup process")
 
     # Set the end time of the backup.
     def __post_backup(self):
         difference = (time.time() - self.start_time)
-        self.__logger.log(f'Finished all backups - Total run time {difference}')          
+        self.__logger.info(f'Finished all backups - Total run time {difference}')          
 
     # Method for checking if there are older backups in the backup location.
     def __get_old_backup(self, target_dir, version):
         # If the target directory doesn't exist return None.
         if not os.path.exists(target_dir) or not os.path.isdir(target_dir):
             return None
-        
-        # Fill the dirs list with all the directories in the target_dir excluding 
+
+        # Fill the dirs list with all the directories in the target_dir excluding
         # directoris with a name not conform the date_format and the current date.
         dirs = [
             dir_name 
             for dir_name in os.listdir(target_dir) 
             if self.__is_valid_date_format(dir_name) and dir_name != self.__backup_date
             ]
-        
+
         # If there are no directories in the location return None.
         if not dirs:
             return None
-        
+
         # If the input was latest than take the last entry from the list.
         if version == "latest":
             list_address = -1
-        # If the input was oldest and there are more than 180 older backups than return 
+        # If the input was oldest and there are more than 180 older backups than return
         # the first entry from the list.
         elif version == "oldest" and len(dirs) > self.__number_of_versions:
             list_address = 0
@@ -97,8 +120,8 @@ class RsyncBackup:
             return True
         except ValueError:
             return False
-        
-    # Method for the backup.    
+
+    # Method for the backup.
     def __rsync(self):
         for backup in self.__rsync_backups:
             servername = backup.get_servername()
@@ -112,7 +135,7 @@ class RsyncBackup:
             object_target = Path(target_location) / self.__backup_date / backup.get_object_name(False)
             # Check if the directory exists
             if object_target.exists():
-                self.__logger.log(f'Backup target {object_target} already exists.')
+                self.__logger.info(f'Backup target {object_target} already exists.')
                 continue
             else:
                 # Create the directory if it doesn't exist
@@ -123,7 +146,7 @@ class RsyncBackup:
 
             if self.__dryrun:
                 rsync_cmd.extend(["--dry-run"])
-            
+
             # Add the source and destination paths
             source_path = backup.get_object_name(True)
             if socket.gethostname() != servername:
@@ -140,14 +163,14 @@ class RsyncBackup:
             if previous_backup is not None:
                 rsync_cmd.extend(["--link-dest", f'{target_location}/{previous_backup}{backup.get_object_name(True)}'])
 
-            self.__logger.log(f'Running command: {rsync_cmd}.')
+            self.__logger.info(f'Running command: {rsync_cmd}.')
             subprocess.run(rsync_cmd)
-            
+
             # If there are older backups that have to be removed than remove it.
             oldest_backup = self.__get_old_backup(target_location, "oldest")
             if oldest_backup is not None:
                 os.remove(Path(target_location, oldest_backup))
-                self.__logger.log(f'Removing backup for {servername} with date {oldest_backup}.')
+                self.__logger.info(f'Removing backup for {servername} with date {oldest_backup}.')
 
     # Method that runs the mount, rsync and umount methods.
     def backup(self):
@@ -171,6 +194,7 @@ class RsyncBackup:
             self.__cryptfs.lock_fs()
 
         self.__post_backup()
+
 
 # Class for each backup object.
 class RsyncObject:
@@ -209,7 +233,8 @@ def main():
     if dryrun:
         rsync_backup = RsyncBackup(config_file, dryrun)
     else:
-        rsync_backup = RsyncBackup(config_file)    
+        rsync_backup = RsyncBackup(config_file)
+    rsync_backup.configure_logging()        
     rsync_backup.backup()
 
 if __name__ == "__main__":

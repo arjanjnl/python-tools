@@ -4,14 +4,16 @@ import os
 import subprocess
 import yaml
 import sys
-from logger import Logger
+import logging  # Changed from 'from logger import Logger'
+from systemd.journal import JournalHandler
 
 class PackageDownloader:
     def __init__(self, config_file, dryrun=False):
         self.__dryrun = dryrun
         self.__interactive = sys.stdin.isatty()
 
-        self.logger = Logger()
+        if not logging.getLogger().hasHandlers():
+            self.__logger = logging.getLogger(__name__)
 
         self.__locations = []
 
@@ -73,6 +75,27 @@ class PackageDownloader:
                     # Create a Location object with the source and destination and add the object to the list.
                     self.__locations.append(Locations(protocol, source_url, destination_path))
 
+    def configure_logging(self):
+        logger = logging.getLogger()
+        logger.setLevel(logging.DEBUG if self.__interactive else logging.INFO)
+        logger.handlers.clear()  # Clear existing handlers to avoid duplicates
+
+        # Formatter for all handlers
+        formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+
+        # Add console handler for interactive mode
+        if self.__interactive:
+            console_handler = logging.StreamHandler()
+            console_handler.setLevel(logging.DEBUG)
+            console_handler.setFormatter(formatter)
+            logger.addHandler(console_handler)
+
+        # Add JournalHandler for logging to the systemd journal
+        journal_handler = JournalHandler()
+        journal_handler.setFormatter(formatter)
+        logger.addHandler(journal_handler)
+        self.__logger = logger                
+
     def download_updates(self):
         try:
             service_name = []
@@ -102,15 +125,15 @@ class PackageDownloader:
                 self.__restart_systemd_service(service)
 
         except Exception as e:
-            self.logger.log_error(f"Error downloading or chowning {destination_path}: {str(e)}")
+            self.__logger.log_error(f"Error downloading or chowning {destination_path}: {str(e)}")
 
     def __restart_systemd_service(self, service_name):
         try:
             # Use the systemctl command to restart the service
             subprocess.run(["systemctl", "restart", service_name], check=True)
-            self.logger.log(f"Service {service_name} restarted successfully.")
+            self.__logger.info(f"Service {service_name} restarted successfully.")
         except subprocess.CalledProcessError as e:
-            self.logger.log_error(f"Error restarting service {service_name}: {e}")
+            self.__logger.error(f"Error restarting service {service_name}: {e}")
 
     def __rsync_download(self, source_url, destination_path):
         try:
@@ -131,9 +154,9 @@ class PackageDownloader:
             subprocess.run(rsync_command, check=True)
 
             # Log action.
-            self.logger.log(f"Downloaded: {destination_path}")
+            self.__logger.info(f"Downloaded: {destination_path}")
         except Exception as e:
-            self.logger.log_error(f"Error downloading {destination_path}: {str(e)}")
+            self.__logger.error(f"Error downloading {destination_path}: {str(e)}")
 
     def __curl_download(self, source_url, destination_path):
         try:
@@ -142,7 +165,7 @@ class PackageDownloader:
             subprocess.run(curl_command, check=True)
 
         except Exception as e:
-            self.logger.log_error(f"Error downloading {destination_path}: {str(e)}")
+            self.__logger.error(f"Error downloading {destination_path}: {str(e)}")
 
 class Locations:
     def __init__(self, protocol, source_url, destination_path, repomd=False):
@@ -169,8 +192,6 @@ def main():
     parser.add_argument('--dryrun', action='store_true', help='Simulate rsync without making any changes')
     args = parser.parse_args()
 
-
-
     config_file = args.config_file
     if not os.path.isfile(config_file):
         print(f"Config file not found: {config_file}")
@@ -181,6 +202,7 @@ def main():
         downloader = PackageDownloader(config_file, dryrun)
     else:
         downloader = PackageDownloader(config_file)
+    downloader.configure_logging()
     downloader.download_updates()    
 
 if __name__ == "__main__":
