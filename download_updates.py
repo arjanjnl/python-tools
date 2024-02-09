@@ -188,11 +188,15 @@ class Locations:
 
 def main():
     parser = argparse.ArgumentParser(description='Rsync Backup Script')
-    parser.add_argument('config_file', help='Path to the configuration file')
+    parser.add_argument(
+        "-c",
+        "--config",
+        help="Path to YAML config file\nUse the following options with -c/--config:",
+    )
     parser.add_argument('--dryrun', action='store_true', help='Simulate rsync without making any changes')
     args = parser.parse_args()
 
-    config_file = args.config_file
+    config_file = args.config
     if not os.path.isfile(config_file):
         print(f"Config file not found: {config_file}")
         sys.exit(1)

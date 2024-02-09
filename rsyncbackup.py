@@ -3,6 +3,7 @@ import os
 import sys
 import yaml
 import subprocess
+import shutil
 from datetime import datetime
 import time
 from pathlib import Path
@@ -34,7 +35,7 @@ class RsyncBackup:
         self.__number_of_versions = config.get("number_of_versions", 180)
         encrypt_storage = config.get("encrypt_storage", False)
 
-                # Create a list of objects from the yaml file.
+        # Create a list of objects from the yaml file.
         source_location = config.get("source_location", {})
         for server_name, directories in source_location.items():
             for directory_config in directories:
@@ -110,7 +111,7 @@ class RsyncBackup:
             list_address = 0
         else:
             return None
-
+        
         return sorted(dirs)[list_address]
 
     # Method for checking the name given is conform the date format.
@@ -168,9 +169,12 @@ class RsyncBackup:
 
             # If there are older backups that have to be removed than remove it.
             oldest_backup = self.__get_old_backup(target_location, "oldest")
+
             if oldest_backup is not None:
-                os.remove(Path(target_location, oldest_backup))
-                self.__logger.info(f'Removing backup for {servername} with date {oldest_backup}.')
+                oldest_backup_path = Path(target_location, oldest_backup)
+                if oldest_backup_path.is_dir():  # Check if the path is indeed a directory
+                    shutil.rmtree(oldest_backup_path)
+                    self.__logger.info(f'Removing backup directory for {servername} with date {oldest_backup}.')    
 
     # Method that runs the mount, rsync and umount methods.
     def backup(self):
@@ -220,11 +224,11 @@ class RsyncObject:
 
 def main():
     parser = argparse.ArgumentParser(description='Rsync Backup Script')
-    parser.add_argument('config_file', help='Path to the configuration file')
+    parser.add_argument('-c', '--config', help='Path to YAML config file\nUse the following options with -c/--config:')
     parser.add_argument('--dryrun', action='store_true', help='Simulate rsync without making any changes')
     args = parser.parse_args()
 
-    config_file = args.config_file
+    config_file = args.config
     if not os.path.isfile(config_file):
         print(f"Config file not found: {config_file}")
         sys.exit(1)

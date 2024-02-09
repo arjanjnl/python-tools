@@ -247,46 +247,50 @@ class Hosts:
 
 def main():
     parser = argparse.ArgumentParser(description="Check services script")
-    parser.add_argument("config_file", help="Path to the configuration file")
-    parser.add_argument("--user", help="User to use for ssh")
-    parser.add_argument("--password", help="Password to use for ssh")
+    parser.add_argument(
+        "-c",
+        "--config",
+        help="Path to YAML config file\nUse the following options with -c/--config:",
+    )
+    parser.add_argument("-u", "--user", help="User to use for ssh")
+    parser.add_argument("-p", "--password", help="Password to use for ssh")
     parser.add_argument(
         "--dryrun", action="store_true", help="Simulate without making any changes"
     )
     parser.add_argument(
-        "--short", action="store_true", help="Only return the status of the services"
+        "-s", "--short", action="store_true", help="Only return the status of the services"
     )
     parser.add_argument(
-        "--error",
+        "-e", "--error",
         action="store_true",
         help="Return the status of only the failed services",
     )
     parser.add_argument(
-        "--short-error",
+        "-se", "--short-error",
         action="store_true",
         help="Like --short but includes last 5 lines of journal log for failed services",
     )
     parser.add_argument(
-        "--lines",
+        "-l","--lines",
         help="The number of lines you want to see from the journal for a failed service",
     )
     parser.add_argument(
-        "--hostname",
+        "-n", "--hostname",
         help="The name of a specific host from the yaml file",
     )
     parser.add_argument(
-        "--custom_only",
+        "-co", "--custom_only",
         action="store_true",
         help="Only the custom commands to check the services",
     )
     parser.add_argument(
-        "--no_custom",
+        "-nc", "--no_custom",
         action="store_true",
         help="No custom commands to check the services",
     )
     args = parser.parse_args()
 
-    config_file = args.config_file
+    config_file = args.config
     if not os.path.isfile(config_file):
         print(f"Config file not found: {config_file}")
         sys.exit(1)

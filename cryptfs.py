@@ -35,6 +35,8 @@ class CryptFs:
         self.__crypt_mount_point = self.__config.get("crypt_mount_point", None)
         self.__crypt_file_name = Path(self.__config.get("crypt_file_name"))
         self.__crypt_device_name = 'crypt_backup'
+        self.__crypt_device_path = '/dev/mapper'
+        self.__crypt_device = os.path.join(self.__crypt_device_path, self.__crypt_device_name)
         self.__crypt_file = None
 
         # Initialize logger
@@ -134,14 +136,25 @@ class CryptFs:
             self.__logger.error(f'Not enough free space in the filesystem. {self.__size_of_format(available_space)} available. {size}{unit} needed.')
             exit(1)            
         try:
-            crypt_device = os.path.join('/dev/mapper', self.__crypt_device_name)
 
             subprocess.run(['dd', 'if=/dev/zero', f'of={self.__crypt_file}', f'bs=1{unit}', f'count={size}'])
             subprocess.run(['cryptsetup', 'luksFormat', '--key-file', '-', self.__crypt_file],input=self.__derived_key, check=True)
-            subprocess.run(['cryptsetup', 'open', '--key-file', '-', self.__crypt_file, self.__crypt_device_name],input=self.__derived_key, check=True)
-            subprocess.run(['mkfs.xfs', crypt_device])
+            subprocess.run(
+                [
+                    "cryptsetup",
+                    "open",
+                    "--key-file",
+                    "-",
+                    self.__crypt_file,
+                    self.__crypt_device,
+                ],
+                input=self.__derived_key,
+                check=True,
+            )
+            subprocess.run(["mkfs.xfs", self.__crypt_device])
 
-            crypt_mount = MountManager(self.__crypt_mount_point, device=crypt_device)
+            crypt_mount = MountManager(
+                self.__crypt_mount_point, device=self.__crypt_device)
             crypt_mount.mount()
 
             self.__logger.info(f'Created encrypted filesystem on {self.__crypt_file}.')
@@ -173,11 +186,25 @@ class CryptFs:
         try:
             with open(self.__crypt_file, 'ab') as fs_file:
                 fs_file.truncate(new_size)
-            subprocess.run(['cryptsetup', 'open', '--key-file', '-', self.__crypt_file, self.__crypt_device_name],input=self.__derived_key, check=True)
-            subprocess.run(['cryptsetup', 'resize', '--key-file', '-', self.__crypt_device_name],input=self.__derived_key, check=True)
+            subprocess.run(
+                [
+                    "cryptsetup",
+                    "open",
+                    "--key-file",
+                    "-",
+                    self.__crypt_file,
+                    self.__crypt_device_name,
+                ],
+                input=self.__derived_key,
+                check=True,
+            )
+            subprocess.run(
+                ["cryptsetup", "resize", "--key-file", "-", self.__crypt_device],
+                input=self.__derived_key,
+                check=True,
+            )
 
-            crypt_device = os.path.join('/dev/mapper', self.__crypt_device_name)
-            crypt_mount = MountManager(self.__crypt_mount_point, device=crypt_device)
+            crypt_mount = MountManager(self.__crypt_mount_point, device=self.__crypt_device)
             crypt_mount.mount()
 
             subprocess.run(['xfs_growfs', self.__crypt_mount_point])
@@ -190,8 +217,21 @@ class CryptFs:
 
         # Unlock the encrypted filesystem using the derived key
         try:
-            subprocess.run(['cryptsetup', 'open', '--key-file', '-', self.__crypt_file, self.__crypt_device_name],input=self.__derived_key, check=True)
-            subprocess.run(['mount', '/dev/mapper/' + self.__crypt_device_name, self.__crypt_mount_point], check=True)
+            subprocess.run(
+                [
+                    "cryptsetup",
+                    "open",
+                    "--key-file",
+                    "-",
+                    self.__crypt_file,
+                    self.__crypt_device_name,
+                ],
+                input=self.__derived_key,
+                check=True,
+            )
+
+            crypt_mount = MountManager(self.__crypt_mount_point, device=self.__crypt_device)
+            crypt_mount.mount()
             self.__logger.info(f'Mounted encrypted file {self.__crypt_file} on {self.__crypt_mount_point}.')
         except subprocess.CalledProcessError as e:
             self.__logger.error(f'Error unlocking encrypted filesystem: {e}')
@@ -201,7 +241,7 @@ class CryptFs:
         umount_crypt_fs.umount()
 
         self.__logger.info(f'Unmounted encrypted filesystem {self.__crypt_mount_point}.')
-        subprocess.run(['cryptsetup', 'close', self.__crypt_device_name])
+        subprocess.run(["cryptsetup", "close", self.__crypt_device])
 
         umount_fs = MountManager(self.__remote_mount_point)
         umount_fs.umount()
@@ -257,117 +297,114 @@ class CryptFs:
             raise ValueError(f"Error retrieving disk usage: {e}")        
 
 def main():
-    parser = argparse.ArgumentParser(description='Encrypted FS tool')
+    parser = argparse.ArgumentParser(description='Encrypted FS tool', formatter_class=argparse.RawTextHelpFormatter)
 
-    # Create a subparser for the top-level commands: genkey, config, createfs
-    subparsers = parser.add_subparsers(dest='command', help='Available commands')
+    # Main options
+    main_group = parser.add_argument_group('Main Options')
+    main_group.add_argument('-c', '--config', help='Path to YAML config file\nUse the following options with -c/--config:')
     
-    # Subcommand: genkey
-    genkey_parser = subparsers.add_parser('genkey', help='Generate an encryption key')
-    genkey_parser.add_argument('output_file', help='Output file for the generated key')
+    # Config-related options
+    config_group = parser.add_argument_group('Config Commands',
+                                            'These options are used in conjunction with -c/--config')
+    config_group.add_argument('-m', '--mount', action='store_true', help='Mount the remote filesystem')
+    config_group.add_argument('-l', '--lock', action='store_true', help='Lock the encrypted filesystem')
+    config_group.add_argument('-ul', '--unlock', action='store_true', help='Unlock the encrypted filesystem')
+    config_group.add_argument('-cf', '--createfs', action='store_true', help='Create an encrypted filesystem file (use -s/--size with this option)')
+    config_group.add_argument('-rs', '--resizefs', action='store_true', help='Resize an encrypted filesystem file (use -s/--size with this option)')
 
-    # Subcommand: createfs
-    createfs_parser = subparsers.add_parser('createfs', help='Create a encrypted filesystem file')
-    createfs_parser.add_argument('key_file', help='File containing the encryption key') 
-    createfs_parser.add_argument('encrypted_file', help='Path and filename for the encrypted filesystem file')
-    createfs_parser.add_argument('size_unit', help='Size of filesystem')
+    # Independent options
+    independent_group = parser.add_argument_group('Independent Commands',
+                                                'These options can be used without -c/--config')
+    independent_group.add_argument('-gk', '--genkey', action='store_true', help='Generate an encryption key (without config file)')
 
-    # Subcommand: config
-    config_parser = subparsers.add_parser('config', help='Add a configfile')
-    config_parser.add_argument('yaml_file', help='YAML-filename')
+    # Options for createfs and resizefs
+    fs_group = parser.add_argument_group('Filesystem Size Options',
+                                        'Use these options with -cf/--createfs or -rs/--resizefs')
+    fs_group.add_argument('-s', '--size', help='Size of filesystem')
 
-    # Create a subparser for the 'config' subcommand
-    config_subparsers = config_parser.add_subparsers(dest='config_command', help='Config subcommands')
+    # Options for createfs without config
+    createfs_group = parser.add_argument_group('CreateFS Options',
+                                            'Use these options with -cf/--createfs without -c/--config')
+    createfs_group.add_argument('-kf', '--keyfile', help='Key file')
+    createfs_group.add_argument('-ef', '--encrypted-file', help='Encrypted file name')
 
-    # Subcommand: config genkey
-    config_genkey_parser = config_subparsers.add_parser('genkey', help='Generate an encryption key')
+    args = parser.parse_args()
 
-    # Subcommand: config genkey
-    config_mount_parser = config_subparsers.add_parser('mount', help='Mount the remote filesystem')
-
-    # Subcommand: config genkey
-    config_unlock_parser = config_subparsers.add_parser('unlock', help='Unlock the encrypted filesystem')
-
-    # Subcommand: config genkey
-    config_lock_parser = config_subparsers.add_parser('lock', help='Lock the encrypted filesystem')
-
-    # Subcommand: config createfs
-    config_createfs_parser = config_subparsers.add_parser('createfs', help='Create a encrypted filesystem file')
-    config_createfs_parser.add_argument('size_unit', help='Size of filesystem')
-
-    # Subcommand: config createfs
-    config_resizefs_parser = config_subparsers.add_parser('resizefs', help='Resize a encrypted filesystem file')
-    config_resizefs_parser.add_argument('size_unit', help='Size of filesystem')
-
-    args = parser.parse_args()  
-
-    if args.command == 'config':
-        yaml_file = args.yaml_file
-        if not os.path.isfile(yaml_file):
-            print(f"Config file not found: {yaml_file}")
+    # Handle genkey without config file
+    if args.genkey and not args.config:
+        if not args.keyfile:
+            print("Key file is required for genkey without a config file.")
             sys.exit(1)
-
-        with open(yaml_file) as file:
-            config = yaml.safe_load(file)
-            encryptfs_config = config.get("encryptfs", {})  # Get the 'encryptfs' section from the config
-            cryptfs = CryptFs(encryptfs_config)
-            cryptfs.configure_logging()
-
-            if not cryptfs.get_crypt_mount_point():
-                crypt_mount_point = config.get('backup_location', None)
-                if not crypt_mount_point:
-                    print('No mount point given for the encrypted file.')
-                    exit(1)
-                cryptfs.set_crypt_mount_point(crypt_mount_point)
-
-        # Handle subcommands within 'config' command
-        if args.config_command == 'createfs':
-            size_unit = args.size_unit
-            cryptfs.create_fs_file(size_unit)
-
-        elif args.config_command == 'genkey':
-            password = getpass.getpass("Enter a password: ")
-            cryptfs.generate_key(password)
-
-        elif args.config_command == 'mount':
-            cryptfs.mount_remote()
-
-        elif args.config_command == 'unlock':
-            cryptfs.unlock_fs()
-            
-        elif args.config_command == 'lock':
-            cryptfs.lock_fs()
-
-        elif args.config_command == 'resizefs':
-            size_unit = args.size_unit
-            cryptfs.resize_fs(size_unit)    
-
-        else:
-            # Handle other commands or show help message
-            parser.print_help()              
-            
-    elif args.command == 'genkey':
-        # Handle 'genkey' subcommand
         cryptfs = CryptFs()
         cryptfs.configure_logging()
         output_file = args.output_file
         cryptfs.set_key_file(output_file)
         password = getpass.getpass("Enter a password: ")
         cryptfs.generate_key(password)
-        
-    elif args.command == 'createfs':
+
+    # Validate config file if specified
+    if args.config:
+        if not os.path.isfile(args.config):
+            print(f"Config file not found: {args.config}")
+            sys.exit(1)
+
+        with open(args.config) as file:
+            config = yaml.safe_load(file)
+            encryptfs_config = config.get("encryptfs", {})
+            cryptfs = CryptFs(
+                encryptfs_config
+            )  # Assuming an instance of CryptFs is needed
+            cryptfs.configure_logging()
+
+        if args.mount:
+            cryptfs.mount_remote()
+
+        elif args.unlock:
+            cryptfs.unlock_fs()
+
+        elif args.lock:
+            cryptfs.lock_fs()
+
+        elif args.createfs:
+            if not args.size:
+                print("Size is required for createfs.")
+                sys.exit(1)
+            cryptfs.create_fs_file(args.size)
+
+        elif args.resizefs:
+            if not args.size:
+                print("Size is required for resizefs.")
+                sys.exit(1)
+            cryptfs.resize_fs(args.size)
+
+        elif args.genkey:
+            password = getpass.getpass("Enter a password: ")
+            cryptfs.generate_key(password)
+
+        else:
+            # Handle other commands or show help message
+            parser.print_help()
+
+    # Handle createfs without config file
+    elif args.createfs:
+        if not (args.keyfile and args.encrypted_file and args.size):
+            print(
+                "Keyfile, encrypted file, and size are required for createfs without a config file."
+            )
+            sys.exit(1)
+
         cryptfs = CryptFs()
         cryptfs.configure_logging()
         key_file = args.key_file
         encrypted_file = args.encrypted_file
-        size_unit = args.size_unit
+        size = args.size
         cryptfs.set_key_file(key_file)
         cryptfs.set_crypt_file(encrypted_file)
-        cryptfs.create_fs_file(size_unit)
+        cryptfs.create_fs_file(size)    
 
     else:
         # Handle other commands or show help message
-        parser.print_help()
+        parser.print_help()              
 
 if __name__ == "__main__":
     main()        

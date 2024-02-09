@@ -86,7 +86,7 @@ class MountManager:
             return
 
         try:
-            self.__logger.info(f'Mounting {self.__mount_point} filesystem.')
+            self.__logger.info(f'Unmounting {self.__mount_point} filesystem.')
             subprocess.run(['umount', '-f', self.__mount_point])
         except subprocess.CalledProcessError as e:
             raise ValueError(f"Error unmounting {self.__mount_point}: {e}")
