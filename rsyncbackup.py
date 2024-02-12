@@ -4,6 +4,7 @@ import sys
 import yaml
 import subprocess
 import shutil
+import textwrap
 from datetime import datetime
 import time
 from pathlib import Path
@@ -24,7 +25,8 @@ class RsyncBackup:
 
         self.__dryrun = dryrun
 
-        with open(config_file) as file:
+        self.__config_file = config_file
+        with open(self.__config_file) as file:
             config = yaml.safe_load(file)
 
         self.__backup_user = config.get("remote_user", "root")
@@ -77,7 +79,7 @@ class RsyncBackup:
     # Set the start time of the backup.
     def __pre_backup(self):
         self.start_time = time.time()
-        self.__logger.info("Start backup process")
+        self.__logger.info(f'Start backup process with config file {self.__config_file}')
 
     # Set the end time of the backup.
     def __post_backup(self):
@@ -109,9 +111,11 @@ class RsyncBackup:
         # the first entry from the list.
         elif version == "oldest" and len(dirs) > self.__number_of_versions:
             list_address = 0
+        elif version == "all":
+            return sorted(dirs)
         else:
             return None
-        
+
         return sorted(dirs)[list_address]
 
     # Method for checking the name given is conform the date format.
@@ -127,7 +131,7 @@ class RsyncBackup:
         for backup in self.__rsync_backups:
             servername = backup.get_servername()
             remote_location = f'{self.__backup_user}@{servername}:{backup.get_object_name(True)}/'
-            target_location = Path(self.__backup_location) / backup.get_servername()
+            target_location = Path(self.__backup_location) / servername
 
             target_location_path = Path(target_location)
             # Check if the target location exists. If not than create the directory.
@@ -174,7 +178,67 @@ class RsyncBackup:
                 oldest_backup_path = Path(target_location, oldest_backup)
                 if oldest_backup_path.is_dir():  # Check if the path is indeed a directory
                     shutil.rmtree(oldest_backup_path)
-                    self.__logger.info(f'Removing backup directory for {servername} with date {oldest_backup}.')    
+                    self.__logger.info(f'Removing backup directory for {servername} with date {oldest_backup}.')
+
+    @staticmethod
+    def __human_readable_size(size, decimal_places=2):
+        for unit in ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB']:
+            if size < 1024.0:
+                break
+            size /= 1024.0
+        return f"{size:.{decimal_places}f} {unit}"
+
+    def __check_number_backups(self, check_type=None):
+        total, used, free = shutil.disk_usage(self.__backup_location)
+        print(f"Filesystem total size: {self.__human_readable_size(total)}, Used size: {self.__human_readable_size(used)}, Free size: {self.__human_readable_size(free)}")
+
+        server_backup_counts = {}
+
+        for backup in self.__rsync_backups:
+            servername = backup.get_servername()
+            object_dir = backup.get_object_name(False)
+            target_location = Path(self.__backup_location) / servername
+            previous_backups = self.__get_old_backup(target_location, "all")
+
+            if previous_backups:
+                directories = [
+                    previous_backup for previous_backup in previous_backups
+                    if Path(target_location, previous_backup, object_dir).is_dir()
+                ]
+
+                if servername not in server_backup_counts:
+                    server_backup_counts[servername] = []
+                server_backup_counts[servername].append((object_dir, len(directories), directories))
+
+        for servername, backups in server_backup_counts.items():
+            print(f"\033[1mServer:\033[0m \033[1;93m{servername}\033[0m")
+            print(f"\033[1m{'Directories':<20} Nr backups\033[0m")
+            for object_dir, count, directories in backups:
+                if check_type == 'full':
+                    backup_names = ', '.join(sorted(directories)) 
+                elif check_type == 'last':
+                    backup_names = sorted(directories)[-1]    
+                elif check_type == 'default':
+                    backup_names = ''
+                
+                # Initial part with object_dir and count
+                initial_part = f"- {str(object_dir):<18} \033[93m{count}\033[0m"
+                # Determine where backup names should start, considering a space after count
+                tab_width = 8
+                start_position = len(initial_part)
+                
+                # Use textwrap to wrap the backup_names, starting from the calculated start_position
+                wrapped_lines = textwrap.wrap(backup_names, width=shutil.get_terminal_size().columns - start_position, initial_indent=' ' * tab_width, subsequent_indent=' ' * start_position)
+
+                # Print the initial part and the first line of backup names (if available) on the same line
+                if wrapped_lines:
+                    print(initial_part + " " + wrapped_lines[0])
+                    # Print any additional lines of backup names, if present
+                    for line in wrapped_lines[1:]:
+                        print(line)
+                else:
+                    # If there are no backup names, just print the initial part
+                    print(initial_part)
 
     # Method that runs the mount, rsync and umount methods.
     def backup(self):
@@ -199,6 +263,23 @@ class RsyncBackup:
 
         self.__post_backup()
 
+    def check_backups(self, check_type=None):
+        mount_fs = MountManager(self.__backup_location)
+
+        if self.__cryptfs:
+            self.__cryptfs.set_crypt_mount_point(self.__backup_location)
+            self.__cryptfs.unlock_fs()
+
+        if self.__need_mount_fs:
+            mount_fs.mount()
+
+        self.__check_number_backups(check_type)
+
+        if self.__need_mount_fs:
+            mount_fs.umount()
+
+        if self.__cryptfs:
+            self.__cryptfs.lock_fs()
 
 # Class for each backup object.
 class RsyncObject:
@@ -223,23 +304,29 @@ class RsyncObject:
         return self.__exclude
 
 def main():
-    parser = argparse.ArgumentParser(description='Rsync Backup Script')
-    parser.add_argument('-c', '--config', help='Path to YAML config file\nUse the following options with -c/--config:')
+    parser = argparse.ArgumentParser(description='Rsync Backup Script', formatter_class=argparse.RawTextHelpFormatter)
+    parser.add_argument('-c', '--config', required=True, help='Path to YAML config file\nUse the following options with -c/--config:')
+    parser.add_argument('-x', '--check', nargs='?', const='default', default=None, choices=['default', 'full', 'last'],
+                    help='Perform a backup check. Types: default (none), full, last. Example: --check full\n'
+                        '  default or leave empty: shows the number of backups for a directory.\n'
+                        '  full: shows all the backups there are for a directory.\n'
+                        '  last: shows the last backup there is for a directory.')
+
     parser.add_argument('--dryrun', action='store_true', help='Simulate rsync without making any changes')
     args = parser.parse_args()
 
     config_file = args.config
-    if not os.path.isfile(config_file):
+    if config_file and not os.path.isfile(config_file):
         print(f"Config file not found: {config_file}")
         sys.exit(1)
 
-    dryrun = args.dryrun
-    if dryrun:
-        rsync_backup = RsyncBackup(config_file, dryrun)
+    rsync_backup = RsyncBackup(config_file, args.dryrun)
+    rsync_backup.configure_logging()
+
+    if args.check:
+        rsync_backup.check_backups(args.check)
     else:
-        rsync_backup = RsyncBackup(config_file)
-    rsync_backup.configure_logging()        
-    rsync_backup.backup()
+        rsync_backup.backup()
 
 if __name__ == "__main__":
     main()
