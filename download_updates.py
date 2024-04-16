@@ -4,13 +4,16 @@ import os
 import subprocess
 import yaml
 import sys
+from datetime import datetime
 import logging  # Changed from 'from logger import Logger'
 from systemd.journal import JournalHandler
+from logging.handlers import SMTPHandler
 
 class PackageDownloader:
-    def __init__(self, config_file, dryrun=False):
+    def __init__(self, config_file, dryrun=False, verbose=False):
         self.__dryrun = dryrun
         self.__interactive = sys.stdin.isatty()
+        self.__verbose = verbose
 
         if not logging.getLogger().hasHandlers():
             self.__logger = logging.getLogger(__name__)
@@ -20,8 +23,11 @@ class PackageDownloader:
         source_path = None
 
         # Open the file and read the config
-        with open(config_file, "r") as yaml_file:
+        self.__config_file = config_file
+        with open(self.__config_file, "r") as yaml_file:
             config = yaml.safe_load(yaml_file)
+
+        mail_config = config.get("mail", False)    
             
         source_location = config.get("source_location")
         protocol = config.get("protocol")
@@ -75,9 +81,30 @@ class PackageDownloader:
                     # Create a Location object with the source and destination and add the object to the list.
                     self.__locations.append(Locations(protocol, source_url, destination_path))
 
-    def configure_logging(self):
+        self.__date_format = config.get("download_date_format", "%Y%m%d")
+        self.__download_date = datetime.now().strftime(self.__date_format)            
+
+        if "mail" in config and mail_config:
+            self.__mail = True
+            self.__local_delivery_user = mail_config.get("local_delivery_user", None)
+            if not self.__local_delivery_user:  
+                self.__mail_server = mail_config.get("mail_server", None)
+                self.__to_address = mail_config.get("to_address", None)
+                self.__from_address = mail_config.get("from_address", self.__to_address)
+                self.__subject = (f'Download {self.__config_file} on {self.__download_date}')
+                mail_user = mail_config.get("mail_user", None)
+                mail_password = mail_config.get("mail_password", None)
+                if mail_user and mail_password:
+                    self.__credentials = (mail_user, mail_password)
+                else:
+                    self.__credentials = None
+        else:
+            self.__mail = False
+
+    def configure_logging(self, mail_log=True):
+        configure_mail_log = mail_log
         logger = logging.getLogger()
-        logger.setLevel(logging.DEBUG if self.__interactive else logging.INFO)
+        logger.setLevel(logging.DEBUG if self.__verbose else logging.INFO)
         logger.handlers.clear()  # Clear existing handlers to avoid duplicates
 
         # Formatter for all handlers
@@ -92,9 +119,34 @@ class PackageDownloader:
 
         # Add JournalHandler for logging to the systemd journal
         journal_handler = JournalHandler()
+        journal_handler.setLevel(logging.INFO)
         journal_handler.setFormatter(formatter)
         logger.addHandler(journal_handler)
-        self.__logger = logger                
+
+        if configure_mail_log and self.__mail:
+            self.__mail_handler = self.__create_mail_handler()
+            if self.__mail_handler:
+                self.__mail_handler.setLevel(logging.DEBUG if self.__verbose else logging.INFO)
+                logger.addHandler(self.__mail_handler)
+
+        self.__logger = logger
+
+    def __create_mail_handler(self):
+        if self.__local_delivery_user:
+            mail_handler = MailHandler(local_user=self.__local_delivery_user)
+        else:    
+            mail_handler = MailHandler(
+                mailhost=self.__mail_server,
+                fromaddr=self.__from_address,
+                toaddrs=[self.__to_address],
+                subject=self.__subject,
+                credentials=self.__credentials if self.__credentials else None,
+                secure=(),
+            )
+
+        mail_handler.setLevel(logging.INFO)  # Adjust as necessary
+        mail_handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+        return mail_handler                
 
     def download_updates(self):
         try:
@@ -119,7 +171,14 @@ class PackageDownloader:
                     self.__curl_download(source_url, destination_path)
 
             # Change the owner for the files so Apache can read them.
-            subprocess.run(["chown", "-R", f'{chown_user}:{chown_group}', self.__destination_location], check=True)
+            chown_cmd = ["chown", "-R", f'{chown_user}:{chown_group}', self.__destination_location]
+            if self.__verbose:  # Check if we should log the subprocess output
+                result = subprocess.run(chown_cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+                self.__logger.debug(result.stdout)
+                if result.stderr:
+                    self.__logger.error(result.stderr)
+            else:
+                subprocess.run(chown_cmd, check=True)
 
             for service in service_name:
                 self.__restart_systemd_service(service)
@@ -138,7 +197,7 @@ class PackageDownloader:
     def __rsync_download(self, source_url, destination_path):
         try:
             # If the programm is called from the command line add verbose to rsync.
-            rsync_command = ["rsync", "-arPv" if self.__interactive else "-arP"]
+            rsync_command = ["rsync", "-arPv"]
 
             # If the dryrun option is given add --dry-run to the rsync-command
             if self.__dryrun:
@@ -151,7 +210,11 @@ class PackageDownloader:
             rsync_command.extend(['rsync://' + source_url + '/', destination_path + '/'])
 
             # Run the rsync command as a subprocces.
-            subprocess.run(rsync_command, check=True)
+            result = subprocess.run(rsync_command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+            if self.__verbose or self.__interactive:
+                self.__logger.debug(result.stdout)
+                if result.stderr:
+                    self.__logger.error(result.stderr)
 
             # Log action.
             self.__logger.info(f"Downloaded: {destination_path}")
@@ -161,8 +224,12 @@ class PackageDownloader:
     def __curl_download(self, source_url, destination_path):
         try:
             curl_command = ["curl", "--create-dirs", "-o", destination_path, source_url]
-
-            subprocess.run(curl_command, check=True)
+            
+            result = subprocess.run(curl_command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+            if self.__verbose or self.__interactive:  # Check if we should log the subprocess output
+                self.__logger.debug(result.stdout)
+                if result.stderr:
+                    self.__logger.error(result.stderr)
 
         except Exception as e:
             self.__logger.error(f"Error downloading {destination_path}: {str(e)}")
@@ -185,6 +252,54 @@ class Locations:
     
     def get_repomd(self):
         return self.__repomd
+    
+class MailHandler(logging.Handler):
+    def __init__(self, mailhost=None, fromaddr=None, toaddrs=None, subject=None, credentials=None, secure=None, local_user=None):
+        super().__init__()
+        self.__buffer = []  # To store log records
+        self.__local_user = local_user
+        self.__mailhost = mailhost
+        self.__fromaddr = fromaddr
+        self.__toaddrs = toaddrs
+        self.__subject = subject
+        self.__credentials = credentials
+        self.__secure = secure if secure else ()
+        
+        self.__mode = "local" if local_user else "smtp"
+
+    def emit(self, record):
+        # Add the formatted log message to the buffer
+        self.__buffer.append(self.format(record))
+
+    def flush(self):
+        # Check the mode to determine how to send the buffered messages
+        if self.__mode == "local":
+            self.__send_local("\n".join(self.__buffer))
+        else:  # SMTP mode
+            self.__send_smtp(self.__buffer)
+        self.__buffer.clear()  # Clear the buffer after sending
+        super().flush()
+
+    def __send_local(self, msg):
+        try:
+            sendmail = subprocess.Popen(["/usr/sbin/sendmail", self.__local_user], stdin=subprocess.PIPE)
+            sendmail.communicate(msg.encode('utf-8'))
+        except Exception as e:
+            self.handleError(e)
+
+    def __send_smtp(self, msgs):
+        if not self.__mailhost or not self.__fromaddr or not self.__toaddrs:
+            print("SMTP configuration is incomplete.")
+            print(self.__mailhost, self.__fromaddr, self.__toaddrs)
+            return
+        
+        full_msg = "\n".join(msgs)
+        try:
+            smtp_handler = SMTPHandler(self.__mailhost, self.__fromaddr, self.__toaddrs, self.__subject, self.__credentials, self.__secure)
+            record = logging.makeLogRecord({"msg": full_msg, "levelname": "INFO", "name": self.name})
+            smtp_handler.emit(record)
+        except Exception as e:
+            print(f"Failed to send email: {e}")
 
 def main():
     parser = argparse.ArgumentParser(description='Rsync Backup Script')
@@ -193,6 +308,7 @@ def main():
         "--config",
         help="Path to YAML config file\nUse the following options with -c/--config:",
     )
+    parser.add_argument('-v', '--verbose', action='store_true', help='Enable verbose output')
     parser.add_argument('--dryrun', action='store_true', help='Simulate rsync without making any changes')
     args = parser.parse_args()
 
@@ -201,11 +317,8 @@ def main():
         print(f"Config file not found: {config_file}")
         sys.exit(1)
 
-    dryrun = args.dryrun
-    if dryrun:
-        downloader = PackageDownloader(config_file, dryrun)
-    else:
-        downloader = PackageDownloader(config_file)
+
+    downloader = PackageDownloader(config_file, verbose=args.verbose, dryrun=args.dryrun)
     downloader.configure_logging()
     downloader.download_updates()    
 

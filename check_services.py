@@ -24,6 +24,7 @@ class CheckServices:
         hostname=None,
         custom_only=False,
         no_custom=False,
+        restart=False,
         default_user="root",
     ):
         self.__dryrun = dryrun
@@ -63,6 +64,7 @@ class CheckServices:
         self.__hostname = hostname
         self.__custom_only = custom_only
         self.__no_custom = no_custom
+        self.__restart = restart
 
     def __format_hostname(self, hostname, distro):
         color_codes = {
@@ -105,6 +107,14 @@ class CheckServices:
         except Exception as e:
             print(f"Error fetching FQDN: {e}", file=sys.stderr)
             return "unknown"
+
+    def __get_uptime(self):
+        try:
+            stdin, stdout, stderr = self.__ssh_client.exec_command("uptime")
+            return stdout.read().decode("utf-8").strip()
+        except Exception as e:
+            print(f"Error fetching FQDN: {e}", file=sys.stderr)
+            return "unknown"    
 
     def __check_default(self, services, custom_cmds=None):
         services_list = " ".join(services)
@@ -174,6 +184,23 @@ class CheckServices:
 
                 print(stdout.read().decode("utf-8"))
 
+                if self.__restart:
+                    self.__restart_service(service)
+                    #status_after_restart = self.__get_service_status(service)
+
+    def __restart_service(self, service_name):
+        if self.__sudo:
+            restart_cmd = (
+                "sudo /usr/bin/systemctl restart " + service_name
+            )
+        else:
+            restart_cmd = (
+                "/usr/bin/systemctl restart " + service_name
+            )
+        stdin, stdout, stderr = self.__ssh_client.exec_command(restart_cmd)
+
+        print(stdout.read().decode("utf-8"))    
+
     def __get_service_status(self, service_name):
         if self.__sudo:
             status_cmd = "sudo /usr/bin/systemctl is-active " + service_name
@@ -188,7 +215,7 @@ class CheckServices:
                 f"Error fetching service status for {service_name}: {e}",
                 file=sys.stderr,
             )
-            return "unknown"
+            return "unknown"   
 
     def check(self):
         hosts_to_check = self.__hosts_list
@@ -214,7 +241,7 @@ class CheckServices:
                     )
 
                     print(
-                        f"\n{self.__format_hostname(self.__get_fqdn().upper(), self.__get_distro_id())}\n"
+                        f"\n{self.__format_hostname(self.__get_fqdn().upper(), self.__get_distro_id())}\n{self.__get_uptime()}\n"
                     )
 
                     if self.__short or self.__short_error or self.__error:
@@ -288,6 +315,11 @@ def main():
         action="store_true",
         help="No custom commands to check the services",
     )
+    parser.add_argument(
+        "-r", "--restart",
+        action="store_true",
+        help="Restart failed services",
+    )
     args = parser.parse_args()
 
     config_file = args.config
@@ -307,6 +339,7 @@ def main():
         hostname=args.hostname,
         custom_only=args.custom_only,
         no_custom=args.no_custom,
+        restart=args.restart
     )
     check_services.check()
 

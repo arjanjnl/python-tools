@@ -15,8 +15,9 @@ from mount_manager import MountManager
 from systemd.journal import JournalHandler
 
 class CryptFs:
-    def __init__(self, config=None):
-        self.__interactive = sys.stdin.isatty()
+    def __init__(self, config=None, verbose=False):
+        interactive = sys.stdin.isatty()
+        self.__verbose = interactive or verbose
 
         if logging.getLogger().hasHandlers():
             self.__logger = logging.getLogger(__name__)
@@ -32,7 +33,7 @@ class CryptFs:
         self.__remote_mount_point = Path(self.__config.get("remote_mount_point"))
         self.__remote_secure = self.__config.get("remote_secure", False)
         self.__key_file = Path(self.__config.get("key_file"))
-        self.__crypt_mount_point = self.__config.get("crypt_mount_point", None)
+        self.__crypt_mount_point = Path(self.__config.get("crypt_mount_point", None))
         self.__crypt_file_name = Path(self.__config.get("crypt_file_name"))
         self.__crypt_device_name = 'crypt_backup'
         self.__crypt_device_path = '/dev/mapper'
@@ -44,14 +45,14 @@ class CryptFs:
 
     def configure_logging(self):
         logger = logging.getLogger()
-        logger.setLevel(logging.DEBUG if self.__interactive else logging.INFO)
+        logger.setLevel(logging.DEBUG if self.__verbose else logging.INFO)
         logger.handlers.clear()  # Clear existing handlers to avoid duplicates
 
         # Formatter for all handlers
         formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
 
         # Add console handler for interactive mode
-        if self.__interactive:
+        if self.__verbose:
             console_handler = logging.StreamHandler()
             console_handler.setLevel(logging.DEBUG)
             console_handler.setFormatter(formatter)
@@ -59,6 +60,7 @@ class CryptFs:
 
         # Add JournalHandler for logging to the systemd journal
         journal_handler = JournalHandler()
+        journal_handler.setLevel(logging.INFO)
         journal_handler.setFormatter(formatter)
         logger.addHandler(journal_handler)
         self.__logger = logger
@@ -146,7 +148,7 @@ class CryptFs:
                     "--key-file",
                     "-",
                     self.__crypt_file,
-                    self.__crypt_device,
+                    self.__crypt_device_name,
                 ],
                 input=self.__derived_key,
                 check=True,
@@ -166,6 +168,7 @@ class CryptFs:
         size, unit = self.__parse_size_unit(size_unit)
 
         if not self.__get_valid_unit(unit):
+            self.__logger.error(f"Invalid unit: {unit}. Valid units are K, M, G, T.")
             exit(1)
 
         self.__prepare_open()
@@ -173,19 +176,19 @@ class CryptFs:
         size_bytes = self.__convert_size_to_bytes(size, unit)
         current_size = os.path.getsize(self.__crypt_file)
         new_size = current_size + size_bytes
-
-        path = self.__crypt_file.parent
         formatted_size = self.__size_of_format(new_size)
 
+        path = self.__crypt_file.parent
         available_space = self.__get_available_space(path)
 
-        if new_size > available_space:
+        if size_bytes > available_space:
             self.__logger.error(f'Not enough free space in the filesystem. {self.__size_of_format(available_space)} available. {formatted_size} needed.')
             exit(1) 
 
         try:
             with open(self.__crypt_file, 'ab') as fs_file:
                 fs_file.truncate(new_size)
+            self.__logger.info(f'Extended file {self.__crypt_file} to {self.__size_of_format(new_size)}.')
             subprocess.run(
                 [
                     "cryptsetup",
@@ -246,6 +249,7 @@ class CryptFs:
         umount_fs = MountManager(self.__remote_mount_point)
         umount_fs.umount()
 
+    @staticmethod
     def __size_of_format(num, suffix='B'):
         for unit in ['', 'K', 'M', 'G', 'T', 'P', 'E', 'Z']:
             if abs(num) < 1024.0:
@@ -253,6 +257,7 @@ class CryptFs:
             num /= 1024.0
         return f"{num:.1f} Y{suffix}"
 
+    @staticmethod
     def __parse_size_unit(input_str):
         try:
             # Split the input into size and unit
@@ -263,6 +268,7 @@ class CryptFs:
         except ValueError:
             raise ValueError("Invalid size/unit format. Example format: '500G'")
 
+    @staticmethod
     def __convert_size_to_bytes(size, unit):
         units = {'K': 1024, 'M': 1024**2, 'G': 1024**3, 'T': 1024**4}
         if unit in units:
@@ -270,12 +276,14 @@ class CryptFs:
         else:
             raise ValueError(f"Invalid unit: {unit}")
 
-    def __get_valid_unit(self, unit):
+    @staticmethod
+    def __get_valid_unit(unit):
         valid_units = ('K', 'M', 'G', 'T')
         if unit not in valid_units:
             raise ValueError(f"Invalid unit: {unit}. Valid units are {', '.join(valid_units)}")
         return True
 
+    @staticmethod
     def __get_available_space(path, unit=None):
         try:
             # Get disk usage statistics for the specified path
@@ -302,7 +310,7 @@ def main():
     # Main options
     main_group = parser.add_argument_group('Main Options')
     main_group.add_argument('-c', '--config', help='Path to YAML config file\nUse the following options with -c/--config:')
-    
+        
     # Config-related options
     config_group = parser.add_argument_group('Config Commands',
                                             'These options are used in conjunction with -c/--config')
@@ -311,6 +319,7 @@ def main():
     config_group.add_argument('-ul', '--unlock', action='store_true', help='Unlock the encrypted filesystem')
     config_group.add_argument('-cf', '--createfs', action='store_true', help='Create an encrypted filesystem file (use -s/--size with this option)')
     config_group.add_argument('-rs', '--resizefs', action='store_true', help='Resize an encrypted filesystem file (use -s/--size with this option)')
+    config_group.add_argument('-v', '--verbose', action='store_true', help='Enable verbose output')
 
     # Independent options
     independent_group = parser.add_argument_group('Independent Commands',
@@ -352,7 +361,8 @@ def main():
             config = yaml.safe_load(file)
             encryptfs_config = config.get("encryptfs", {})
             cryptfs = CryptFs(
-                encryptfs_config
+                encryptfs_config,
+                args.verbose
             )  # Assuming an instance of CryptFs is needed
             cryptfs.configure_logging()
 
